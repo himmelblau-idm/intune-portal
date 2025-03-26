@@ -1,0 +1,128 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    libwebkit2gtk-4.0-37 \
+    libjavascriptcoregtk-4.0-18 \
+    wget curl fuse libfuse2 \
+    desktop-file-utils \
+    libglib2.0-bin \
+    ca-certificates \
+    gcc gpg \
+    libgl1 \
+    libegl1 \
+    libgles2 \
+    libglx0 \
+    libglx-mesa0 \
+    libegl-mesa0 \
+    libxcb-glx0 \
+    libx11-xcb1 \
+    xxd && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN curl https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > microsoft.gpg && \
+    install -o root -g root -m 644 microsoft.gpg /usr/share/keyrings/microsoft.gpg && \
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/ubuntu/22.04/prod jammy main" \
+    > /etc/apt/sources.list.d/microsoft-ubuntu-jammy-prod.list && \
+    rm microsoft.gpg
+
+RUN apt-get update && \
+    apt-get install -y intune-portal || true && \
+    dpkg --configure -a || true && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /opt/intune-portal.AppDir/usr/bin && \
+    cp /usr/bin/intune-portal /opt/intune-portal.AppDir/usr/bin/
+
+RUN mkdir -p /opt/intune-portal.AppDir/usr/lib && \
+    ldd /usr/bin/intune-portal | grep "=>" | awk '{print $3}' | grep -vE 'libc.so|libpthread.so|libdl.so|ld-linux' | \
+    xargs -I '{}' cp -Lv '{}' /opt/intune-portal.AppDir/usr/lib/ && \
+    cp -Lv /usr/lib/x86_64-linux-gnu/libGL.so.* \
+           /usr/lib/x86_64-linux-gnu/libGLX.so.* \
+           /usr/lib/x86_64-linux-gnu/libEGL.so.* \
+           /usr/lib/x86_64-linux-gnu/libGLES*.so.* \
+           /usr/lib/x86_64-linux-gnu/libxcb*.so.* \
+           /opt/intune-portal.AppDir/usr/lib/
+
+# Explicitly bundle WebKitGTK processes and resources
+RUN mkdir -p /opt/intune-portal.AppDir/usr/lib/webkit2gtk-4.0 && \
+    cp -a /usr/lib/x86_64-linux-gnu/webkit2gtk-4.0/* \
+          /opt/intune-portal.AppDir/usr/lib/webkit2gtk-4.0/
+
+RUN OLD_PATH="/usr/lib/x86_64-linux-gnu/webkit2gtk-4.0" && \
+    NEW_PATH="./usr/lib/webkit2gtk-4.0" && \
+    BIN="/opt/intune-portal.AppDir/usr/lib/libwebkit2gtk-4.0.so.37" && \
+    OFFSET=$(strings -t d "$BIN" | grep -F "$OLD_PATH" | head -n1 | awk '{print $1}') && \
+    printf "%s" "$NEW_PATH" | dd of="$BIN" bs=1 seek="$OFFSET" conv=notrunc && \
+    PADDING=$(( ${#OLD_PATH} - ${#NEW_PATH} )) && \
+    printf '%*s' "$PADDING" | tr ' ' '\0' | dd of="$BIN" bs=1 seek=$(($OFFSET + ${#NEW_PATH})) conv=notrunc
+
+RUN mkdir -p /opt/intune-portal.AppDir/usr/lib/webkit2gtk-4.0/injected-bundle && \
+    cp -a /usr/lib/x86_64-linux-gnu/webkit2gtk-4.0/injected-bundle/libwebkit2gtkinjectedbundle.so \
+          /opt/intune-portal.AppDir/usr/lib/webkit2gtk-4.0/injected-bundle/
+
+RUN OLD_INJECTED_PATH="/usr/lib/x86_64-linux-gnu/webkit2gtk-4.0/injected-bundle/" && \
+    NEW_INJECTED_PATH="./usr/lib/webkit2gtk-4.0/injected-bundle/" && \
+    BIN="/opt/intune-portal.AppDir/usr/lib/libwebkit2gtk-4.0.so.37" && \
+    OFFSET=$(strings -t d "$BIN" | grep -F "$OLD_INJECTED_PATH" | head -n1 | awk '{print $1}') && \
+    printf "%s" "$NEW_INJECTED_PATH" | dd of="$BIN" bs=1 seek="$OFFSET" conv=notrunc && \
+    PADDING=$(( ${#OLD_INJECTED_PATH} - ${#NEW_INJECTED_PATH} )) && \
+    printf '%*s' "$PADDING" | tr ' ' '\0' | dd of="$BIN" bs=1 seek=$(($OFFSET + ${#NEW_INJECTED_PATH})) conv=notrunc
+
+# Bundle GLib schemas explicitly
+RUN mkdir -p /opt/intune-portal.AppDir/usr/share/glib-2.0/schemas && \
+    cp -a /usr/share/glib-2.0/schemas/* \
+          /opt/intune-portal.AppDir/usr/share/glib-2.0/schemas/ && \
+    glib-compile-schemas /opt/intune-portal.AppDir/usr/share/glib-2.0/schemas/
+
+# Bundle CA certificates explicitly
+RUN mkdir -p /opt/intune-portal.AppDir/etc/ssl/certs && \
+    cp -a /etc/ssl/certs/* \
+          /opt/intune-portal.AppDir/etc/ssl/certs/
+
+# Bundle GIO modules explicitly
+RUN mkdir -p /opt/intune-portal.AppDir/usr/lib/gio/modules && \
+    find /usr/lib/x86_64-linux-gnu/gio/modules/ -type f -not -name "libgiolibproxy.so" \
+        -exec cp -a {} /opt/intune-portal.AppDir/usr/lib/gio/modules/ \;
+
+# Add required AppRun script
+RUN echo '#!/bin/sh\n\
+HERE="$(dirname "$(readlink -f "${0}")")"\n\
+cd "$HERE"\n\
+export LD_LIBRARY_PATH="$HERE/lib64:$HERE/usr/lib:$LD_LIBRARY_PATH"\n\
+export LIBGL_DRIVERS_PATH="/usr/lib/x86_64-linux-gnu/dri"\n\
+export GDK_PIXBUF_MODULE_FILE="$HERE/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"\n\
+export GIO_MODULE_DIR="$HERE/usr/lib/gio/modules"\n\
+export XDG_DATA_DIRS="$HERE/usr/share:$XDG_DATA_DIRS"\n\
+export GSETTINGS_SCHEMA_DIR="$HERE/usr/share/glib-2.0/schemas"\n\
+export SSL_CERT_DIR="$HERE/etc/ssl/certs"\n\
+export SSL_CERT_FILE="$HERE/etc/ssl/certs/ca-certificates.crt"\n\
+exec "$HERE/usr/bin/intune-portal" "$@"' > /opt/intune-portal.AppDir/AppRun && \
+chmod +x /opt/intune-portal.AppDir/AppRun
+
+# Create desktop file at AppDir root
+RUN echo '[Desktop Entry]\n\
+Type=Application\n\
+Name=Microsoft Intune Portal\n\
+Exec=intune-portal\n\
+Icon=intune\n\
+Categories=Network;\n\
+' > /opt/intune-portal.AppDir/intune-portal.desktop
+
+# Optional copy desktop file to standard location
+RUN mkdir -p /opt/intune-portal.AppDir/usr/share/applications && \
+    cp /opt/intune-portal.AppDir/intune-portal.desktop /opt/intune-portal.AppDir/usr/share/applications/intune-portal.desktop
+
+# Place the icon at AppDir root and standard icon path
+RUN mkdir -p /opt/intune-portal.AppDir/usr/share/icons/hicolor/48x48/apps && \
+    cp /usr/share/icons/hicolor/48x48/apps/intune.png /opt/intune-portal.AppDir/usr/share/icons/hicolor/48x48/apps/intune.png && \
+    cp /usr/share/icons/hicolor/48x48/apps/intune.png /opt/intune-portal.AppDir/intune.png
+
+RUN wget -q https://github.com/AppImage/AppImageKit/releases/latest/download/appimagetool-x86_64.AppImage \
+    -O /usr/local/bin/appimagetool && \
+    chmod +x /usr/local/bin/appimagetool
+
+ENV APPIMAGE_EXTRACT_AND_RUN=1
+
+ENTRYPOINT ["/usr/local/bin/appimagetool", "/opt/intune-portal.AppDir", "/output/intune-portal-x86_64.AppImage"]
